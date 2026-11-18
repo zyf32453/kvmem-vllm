@@ -56,7 +56,7 @@ python -m experiments.text_vs_kv_deletion.prepare verify \
 
 ## 运行时证据
 
-离线快照中的物理映射和 Attention KV 哈希为 `null`，recurrent 状态标为待采集。后续 worker 用 `verify --capture /path/to/capture.json` 关联其运行时记录。捕获记录须包含以下字段。
+离线快照中的物理映射和 Attention KV 哈希为 `null`，recurrent 状态标为待采集。可以对 Phase 2 的 `seed.json`、暖组的原始响应文件或独立 capture JSON 使用 `prepare verify --capture /path/to/evidence.json`，核验它们与准备快照的关联。捕获记录包含以下字段。
 
 | 层次 | 字段 |
 | --- | --- |
@@ -64,4 +64,46 @@ python -m experiments.text_vs_kv_deletion.prepare verify \
 | Attention 层 | `attention` 以层名为键，每层提供原生 `slot_mapping`、`cache_page_count` 和 `kv_sha256` |
 | 循环状态 | `recurrent_state` 包含 `layout`、`boundary_tokens`、逐层 `conv_sha256` 和 `ssm_sha256`、以及 `accepted_counter_sha256` |
 
-校验器根据实际 slot mapping 计算每层逻辑到物理内核页的关系，并检查边界、重复页、越界槽位、历史和循环状态指纹的覆盖。结果仍需在同一 GPU 会话中由 worker 采集并校验状态字节，再用于正式测量。GPU runner、DeepSWE 任务和物理回收各有阶段验收条件。
+校验器根据实际 slot mapping 计算每层逻辑到物理内核页的关系，并检查边界、重复页、越界槽位、历史和循环状态指纹的覆盖。
+
+## Phase 2 配对推理
+
+在仓库根目录使用上面配置对应的 vLLM 和同一份本地模型、tokenizer。首轮针对 vLLM 0.32.0 的 eager FlashInfer、FP8 KV、单 GPU、单请求和 Qwen3.5 系 GDN。先在 CPU 上检查真实数据计划。
+
+```sh
+python -m experiments.text_vs_kv_deletion.runner \
+  --prepared artifacts/text-vs-kv-prepared --limit 1 --plan-only --allow-unreviewed
+```
+
+先跑一条 replay 冒烟，确认零删除对照和逐层记录。
+
+```sh
+python -m experiments.text_vs_kv_deletion.runner \
+  --prepared artifacts/text-vs-kv-prepared \
+  --model /path/to/qualified/model --tokenizer /path/to/qualified/tokenizer \
+  --execution replay --limit 1 --repeats 1 --allow-unreviewed \
+  --output artifacts/text-vs-kv-replay-smoke
+```
+
+在相同配置上测量暖续跑。
+
+```sh
+VLLM_USE_V2_MODEL_RUNNER=1 python -m experiments.text_vs_kv_deletion.runner \
+  --prepared artifacts/text-vs-kv-prepared \
+  --model /path/to/qualified/model --tokenizer /path/to/qualified/tokenizer \
+  --execution warm --limit 1 --repeats 1 --allow-unreviewed \
+  --output artifacts/text-vs-kv-warm-smoke
+```
+
+用 `--mode practical_deletion` 单独验证另一种删除对齐方式。正式运行使用已审核候选，去掉 `--allow-unreviewed`，默认每对独立重复三次。每次使用新输出目录。可以通过 `--candidate` 精确选择候选。
+
+| 运行方式 | G0 完整输入 | G1 文本删除 | G2 影子排除 |
+| --- | --- | --- | --- |
+| Replay | 完整历史重新计算 | 重新分词后冷 Prefill | 完整历史重新计算，Probe 和生成时排除候选页 |
+| Warm | 一次构建历史快照后恢复完整 KV 与循环状态 | 重新分词后冷 Prefill | 从同一已计算状态恢复，Probe 和生成时排除候选页 |
+
+暖路径在历史边界捕获 Attention KV、卷积状态、SSM 状态与已接受计数器。vLLM 为新请求分配原生页，实验 connector 在首个 Probe 前恢复字节并核验哈希。每个暖组要观察到首个模型位置等于历史边界，且 worker 提交的历史 Token 数为零。G1 从位置零开始，核对完整 Probe IDs 并检查缓存命中。三臂都使用同一删除计划。
+
+每个候选先比较原生完整输入和零删除 Shadow 的逐层 Probe 输出和开头生成 Token。暖路径还比较原生快照恢复与原生完整输入。任一对照出错会保留已产生的 JSON 并停止该轮。
+
+输出的 `cases/<序号>/repeat-<序号>/pair.json` 汇总 G0/G1/G2，`zero-deletion.json` 保存门槛和判定，各 arm 的 JSON 保存请求指纹、缓存证据、逐层偏差、输出和耗时。CUDA forward 时间按纯历史、纯 Probe、混合 Prompt 和解码记录。一次性快照建立、恢复复制、文本重新分词以及请求 wall time 分别计时。此处的时延包含诊断插桩开销。Shadow 实际回收的物理字节为 0。

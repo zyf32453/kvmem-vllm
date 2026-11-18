@@ -235,7 +235,8 @@ def build(bundle, dataset, output, config, tokenizer, tokenizer_evidence, review
     return verify(output)
 
 
-def verify(output, bundle=None, capture_files=()):
+def read_prepared(output, bundle=None, capture_files=()):
+    """Read verified snapshots and both plans without re-opening their files."""
     manifest = read_json(output / 'manifest.json')
     verify_seal(manifest, 'prepared_dataset')
     require(bool(manifest['cases']) and 'human-review.csv' in manifest['files'],
@@ -248,6 +249,7 @@ def verify(output, bundle=None, capture_files=()):
     eligible = Counter()
     excluded = {mode: Counter() for mode in MODES}
     reviewed = 0
+    cases = []
     for case in manifest['cases']:
         require(case['candidate_id'] not in seen, 'Duplicate candidate in prepared dataset')
         seen.add(case['candidate_id'])
@@ -265,9 +267,11 @@ def verify(output, bundle=None, capture_files=()):
         snapshot = snapshots[relative]
         require(set(case['plans']) == set(MODES), 'Each case must contain both deletion modes')
         shared_candidate = None
+        plans = {}
         for mode, path in case['plans'].items():
             require(path in manifest['files'], 'Plan is missing from the checksum manifest')
             plan = validate_plan(snapshot, read_json(within(output, path)))
+            plans[mode] = plan
             candidate = plan['candidate']
             require(mode == plan['mode'] and candidate['candidate_id'] == case['candidate_id'],
                     'Case, mode, and plan do not agree')
@@ -279,19 +283,28 @@ def verify(output, bundle=None, capture_files=()):
             else:
                 excluded[mode][plan['reason']] += 1
         reviewed += shared_candidate['human_review'] is not None
+        cases.append((snapshot, plans))
 
     by_sha = {s['sha256']: s for s in snapshots.values()}
     for path in capture_files:
         capture = read_json(path)
+        if 'worker' in capture:
+            capture = capture['worker']['capture']
+        require(isinstance(capture, dict), f'No native capture recorded in {path}')
         identity = capture['snapshot_sha256']
         require(identity in by_sha, 'Capture does not belong to this dataset')
         validate_runtime_capture(by_sha[identity], capture)
-    return {
+    summary = {
         'manifest_sha256': manifest['sha256'], 'snapshots': len(snapshots), 'candidates': len(seen),
         'reviewed': reviewed, 'eligible_by_mode': {mode: eligible[mode] for mode in MODES},
         'excluded_by_mode': {mode: dict(excluded[mode]) for mode in MODES},
         'runtime_manifests_validated': len(capture_files),
     }
+    return summary, cases
+
+
+def verify(output, bundle=None, capture_files=()):
+    return read_prepared(output, bundle, capture_files)[0]
 
 
 def main(argv=None):

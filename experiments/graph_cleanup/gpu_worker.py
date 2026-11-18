@@ -114,10 +114,13 @@ class Measurement:
         def forward(layer,query,key,value,kv_cache,attn_metadata,output,*args,**kwargs):
             config=self.active
             # KV update is a separate native op, already performed by
-            # Attention.forward. After the fixed probe, the original attention
-            # result would be discarded: avoid computing it a second time.
+            # Attention.forward. When all rows use Shadow, the original output
+            # would be discarded. The pilot keeps its native Probe diagnostic
+            # unless the paired runner opts out.
             skip_original=(config is not None and config['mode']!='native'
-                           and self.positions[0]>=config['query_end'])
+                           and (self.positions[0]>=config['query_end']
+                                or (config.get('skip_native_probe')
+                                    and self.positions[0]>=config['query_start'])))
             if skip_original:
                 if layer.attn_backend.forward_includes_kv_cache_update:
                     raise RuntimeError('Cannot bypass a fused KV-write backend')

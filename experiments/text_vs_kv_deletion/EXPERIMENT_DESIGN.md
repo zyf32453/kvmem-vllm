@@ -45,7 +45,7 @@ G0/G1/G2 先跑。DeepSWE 的五组齐套以 G3 和代理干预入口验收为�
 
 ### 真续跑与状态残留
 
-Phase 2 先用既有 eager worker 做等输入重算诊断，并把 G1 冷 Prefill 与其配对。性能主实验追加一次显式冻结历史，再从同一边界启动两个隔离的暖分支。需用原生请求生命周期或受控私有 checkpoint 恢复真实 K/V、recurrent 初态和绝对 position，给 worker 初始化已核验页表。若分支只能重算，从计数器与日志记录事实，延期暖 Shadow 的时延结论。System One 私有读的 COW 与 recurrent 复制可参考，任意长度 Probe 及生成需独立资格。
+Phase 2 的 Replay 入口用既有 eager worker 做等输入重算诊断，并把 G1 冷 Prefill 与其配对。Warm 入口在原生请求到达历史边界时冻结 Attention K/V、recurrent 状态和已接受计数器。两个独立暖请求通过 vLLM 的同步 connector 在首个 Probe 前恢复同一份字节，逐层核验物理槽位、状态指纹和绝对位置。正式暖续跑需通过真实 GPU 的零删除对照，并在日志中观察到零历史 Token 重算。模型输出、诊断耗时和 GPU 资格证据见 [运行说明](README.md#phase-2-配对推理)。
 
 现有 Shadow 对应 KV-1。KV-2 需要按定义排除候选并重算它之后被保留的 token K/V。混合模型中 KV 的重算依赖状态传播，必须单独记录初态来源。KV-3 再验证相关 recurrent 状态从候选之前的真实 checkpoint 或受控完整前缀重建，比较其中 conv 与 SSM。二者目前是后续假设。可以用只在候选处出现的合成事实诊断残留，同时用真实被审核样本检验结果能否推广。
 

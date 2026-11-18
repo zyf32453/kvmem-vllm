@@ -335,3 +335,17 @@ def validate_runtime_capture(snapshot, capture):
         'attention_kv_sha256': attention_hashes,
         'recurrent_state': state,
     }
+
+
+def allocation_slots(blocks, block_size, length, page, capacity):
+    """Expand allocator blocks into the token slots seen by the Attention kernel."""
+    require(all(type(value) is int and value > 0 for value in (block_size, length, page, capacity))
+            and block_size % page == 0, 'Invalid allocator or kernel geometry')
+    count = (length + block_size - 1) // block_size
+    owned = blocks[:count]
+    require(len(owned) == count and len(set(owned)) == count
+            and all(type(block) is int and block > 0 for block in owned),
+            'Invalid native allocation for warm prefix')
+    slots = [owned[i // block_size] * block_size + i % block_size for i in range(length)]
+    require(all(slot < capacity * page for slot in slots), 'Warm slot exceeds the native cache')
+    return slots
